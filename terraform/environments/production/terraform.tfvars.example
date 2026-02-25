@@ -1,0 +1,27 @@
+# Production Environment Terraform Variables File
+# Copy this to terraform.tfvars and fill in the values
+
+aws_region          = "us-east-1"
+project_name        = "aws-cost-dashboard"
+environment         = "production"
+cost_center         = "engineering"
+
+# Docker images from GitHub Container Registry
+backend_image       = "ghcr.io/bshah1914/aws-cost-dashboard-backend:latest"
+frontend_image      = "ghcr.io/bshah1914/aws-cost-dashboard-frontend:latest"
+
+# RDS Configuration
+db_password         = "CHANGE_ME_TO_SECURE_PASSWORD"
+db_username         = "dbadmin"
+db_name             = "costdb"
+
+# AWS Credentials for application (Cost Explorer access)
+aws_access_key_id     = "CHANGE_ME"
+aws_secret_access_key = "CHANGE_ME"
+
+# Application Secrets (MUST be different from staging)
+flask_secret_key    = "CHANGE_ME"
+jwt_secret          = "CHANGE_ME"
+
+# CloudWatch Alarms (REQUIRED for production)
+alarm_topic_arn     = "arn:aws:sns:us-east-1:ACCOUNT_ID:topic-name"

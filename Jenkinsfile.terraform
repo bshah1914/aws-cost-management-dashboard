@@ -1,0 +1,260 @@
+pipeline {
+    agent any
+
+    environment {
+        REGISTRY = 'ghcr.io'
+        IMAGE_PREFIX = 'bshah1914'
+        BACKEND_IMAGE = "${REGISTRY}/${IMAGE_PREFIX}/aws-cost-dashboard-backend"
+        FRONTEND_IMAGE = "${REGISTRY}/${IMAGE_PREFIX}/aws-cost-dashboard-frontend"
+        REGISTRY_CREDENTIALS = credentials('github-container-registry')
+        AWS_CREDENTIALS = credentials('aws-credentials')
+        GIT_REPO = 'https://github.com/bshah1914/aws-cost-management-dashboard.git'
+        TERRAFORM_DIR = 'terraform/environments'
+    }
+
+    parameters {
+        choice(
+            name: 'ACTION',
+            choices: ['plan', 'apply', 'destroy'],
+            description: 'Terraform action to perform'
+        )
+        choice(
+            name: 'ENVIRONMENT',
+            choices: ['staging', 'production'],
+            description: 'Deployment environment'
+        )
+        booleanParam(
+            name: 'BUILD_IMAGES',
+            defaultValue: true,
+            description: 'Build and push Docker images?'
+        )
+        string(
+            name: 'IMAGE_TAG',
+            defaultValue: 'latest',
+            description: 'Docker image tag (use commit hash for prod)'
+        )
+    }
+
+    stages {
+        stage('Checkout') {
+            steps {
+                script {
+                    echo "Cloning repository..."
+                    checkout([
+                        $class: 'GitSCM',
+                        branches: [[name: '*/main']],
+                        userRemoteConfigs: [[url: "${GIT_REPO}"]]
+                    ])
+                }
+            }
+        }
+
+        stage('Build Backend Image') {
+            when {
+                expression { params.BUILD_IMAGES == true }
+            }
+            steps {
+                script {
+                    echo "Building backend Docker image..."
+                    sh '''
+                        docker build -t ${BACKEND_IMAGE}:${IMAGE_TAG} \
+                                   -t ${BACKEND_IMAGE}:latest \
+                                   -f backend/Dockerfile \
+                                   backend/
+                    '''
+                }
+            }
+        }
+
+        stage('Build Frontend Image') {
+            when {
+                expression { params.BUILD_IMAGES == true }
+            }
+            steps {
+                script {
+                    echo "Building frontend Docker image..."
+                    sh '''
+                        docker build -t ${FRONTEND_IMAGE}:${IMAGE_TAG} \
+                                   -t ${FRONTEND_IMAGE}:latest \
+                                   -f frontend/Dockerfile \
+                                   frontend/
+                    '''
+                }
+            }
+        }
+
+        stage('Push to Registry') {
+            when {
+                expression { params.BUILD_IMAGES == true }
+            }
+            steps {
+                script {
+                    echo "Logging in to GitHub Container Registry..."
+                    sh '''
+                        echo $REGISTRY_CREDENTIALS_PSW | docker login ${REGISTRY} \
+                            -u $REGISTRY_CREDENTIALS_USR \
+                            --password-stdin
+                    '''
+
+                    echo "Pushing backend image..."
+                    sh '''
+                        docker push ${BACKEND_IMAGE}:${IMAGE_TAG}
+                        docker push ${BACKEND_IMAGE}:latest
+                    '''
+
+                    echo "Pushing frontend image..."
+                    sh '''
+                        docker push ${FRONTEND_IMAGE}:${IMAGE_TAG}
+                        docker push ${FRONTEND_IMAGE}:latest
+                    '''
+
+                    sh 'docker logout ${REGISTRY}'
+                }
+            }
+        }
+
+        stage('Validate Terraform') {
+            steps {
+                script {
+                    echo "Validating Terraform configuration..."
+                    dir("${TERRAFORM_DIR}/${ENVIRONMENT}") {
+                        sh '''
+                            terraform init -backend=false
+                            terraform validate
+                            terraform fmt -check -recursive ..
+                        '''
+                    }
+                }
+            }
+        }
+
+        stage('Terraform Plan') {
+            steps {
+                script {
+                    echo "Running Terraform plan for ${ENVIRONMENT}..."
+                    dir("${TERRAFORM_DIR}/${ENVIRONMENT}") {
+                        withAWS(credentials: 'aws-credentials') {
+                            sh '''
+                                terraform init
+                                terraform plan \
+                                    -var="backend_image=${BACKEND_IMAGE}:${IMAGE_TAG}" \
+                                    -var="frontend_image=${FRONTEND_IMAGE}:${IMAGE_TAG}" \
+                                    -out=tfplan
+                            '''
+                        }
+                    }
+                }
+            }
+        }
+
+        stage('Terraform Apply') {
+            when {
+                expression { params.ACTION == 'apply' }
+            }
+            steps {
+                script {
+                    echo "Applying Terraform changes to ${ENVIRONMENT}..."
+                    
+                    // Require approval for production
+                    if (params.ENVIRONMENT == 'production') {
+                        input message: 'Apply Terraform to PRODUCTION?', ok: 'Deploy'
+                    }
+                    
+                    dir("${TERRAFORM_DIR}/${ENVIRONMENT}") {
+                        withAWS(credentials: 'aws-credentials') {
+                            sh '''
+                                terraform apply tfplan
+                            '''
+                        }
+                    }
+                }
+            }
+        }
+
+        stage('Terraform Destroy') {
+            when {
+                expression { params.ACTION == 'destroy' }
+            }
+            steps {
+                script {
+                    // Require explicit approval for destroy
+                    if (params.ENVIRONMENT == 'production') {
+                        input message: 'DESTROY PRODUCTION resources? This is irreversible!', ok: 'Destroy'
+                    } else {
+                        input message: "Destroy ${ENVIRONMENT} resources?", ok: 'Destroy'
+                    }
+                    
+                    echo "Destroying infrastructure in ${ENVIRONMENT}..."
+                    dir("${TERRAFORM_DIR}/${ENVIRONMENT}") {
+                        withAWS(credentials: 'aws-credentials') {
+                            sh '''
+                                terraform destroy -auto-approve
+                            '''
+                        }
+                    }
+                }
+            }
+        }
+
+        stage('Capture Outputs') {
+            when {
+                expression { params.ACTION == 'apply' }
+            }
+            steps {
+                script {
+                    dir("${TERRAFORM_DIR}/${ENVIRONMENT}") {
+                        echo "Capturing Terraform outputs..."
+                        sh '''
+                            echo "=== Deployment Outputs ===" 
+                            terraform output -json > ../../../outputs-${ENVIRONMENT}.json
+                            terraform output
+                        '''
+                    }
+                }
+            }
+        }
+
+        stage('Health Check') {
+            when {
+                expression { params.ACTION == 'apply' }
+            }
+            steps {
+                script {
+                    echo "Running health checks..."
+                    sh '''
+                        if [ -f outputs-${ENVIRONMENT}.json ]; then
+                            ALB_URL=$(cat outputs-${ENVIRONMENT}.json | jq -r '.alb_dns_name.value')
+                            echo "Testing ALB: http://${ALB_URL}"
+                            
+                            for i in {1..5}; do
+                                if curl -f http://${ALB_URL} 2>/dev/null; then
+                                    echo "✓ Health check passed"
+                                    break
+                                fi
+                                echo "Attempt $i/5 failed, waiting..."
+                                sleep 30
+                            done
+                        fi
+                    '''
+                }
+            }
+        }
+    }
+
+    post {
+        always {
+            script {
+                echo "Pipeline execution completed"
+                
+                // Archive outputs
+                archiveArtifacts artifacts: 'outputs-*.json', allowEmptyArchive: true
+            }
+        }
+        success {
+            echo "✓ Terraform ${params.ACTION} completed successfully for ${ENVIRONMENT}"
+        }
+        failure {
+            echo "✗ Pipeline failed. Review logs above."
+        }
+    }
+}
