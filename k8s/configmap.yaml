@@ -1,0 +1,10 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: app-config
+  namespace: ${NAMESPACE}
+data:
+  LOG_LEVEL: "info"
+  FLASK_ENV: "production"
+  APP_NAME: "AWS Cost Management Dashboard"
+  # Add other environment variables here
