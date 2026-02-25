@@ -61,7 +61,7 @@ locals {
 
 # VPC Module
 module "vpc" {
-  source = "../modules/vpc"
+  source = "../../modules/vpc"
 
   project_name         = var.project_name
   environment          = var.environment
@@ -153,7 +153,7 @@ resource "aws_security_group" "db" {
 
 # ALB Module
 module "alb" {
-  source = "../modules/alb"
+  source = "../../modules/alb"
 
   project_name        = var.project_name
   environment         = var.environment
@@ -164,7 +164,7 @@ module "alb" {
 
 # RDS Module
 module "rds" {
-  source = "../modules/rds"
+  source = "../../modules/rds"
 
   project_name          = var.project_name
   environment           = var.environment
@@ -201,7 +201,7 @@ resource "aws_secretsmanager_secret_version" "app_secrets" {
 
 # ECS Module
 module "ecs" {
-  source = "../modules/ecs"
+  source = "../../modules/ecs"
 
   project_name              = var.project_name
   environment               = var.environment
